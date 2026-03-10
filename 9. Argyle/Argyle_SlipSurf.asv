@@ -1,0 +1,409 @@
+% DRAWS CROSS SECTIONS BASED ON ELEVATION. X SPACING IS USER DEFINED IN
+% ARCGIS. MUST RUN Puritan_XSEC_DataProcess.m FIRST
+
+%% INPUT PROCESSED DATA
+
+clear all; clc; close all
+
+load("ArgyleAllData.mat")
+
+%% GENERATE THE PRE AND POST BLOCKS WITH UNKNOWNS
+
+% First NaN set is the base of the slip surface at the bathymetry line and
+% the second NaN set is the break point of the slip surface beneath the block. 
+% I'll fill these later based on trial and error.
+
+preblock_unk = [130, 135.072; 140, 134.152; 150, 131.413; 160, 124.853; ...
+    170, 121.024; 180, 118.828; 190, 116.22; 200, 112.719; 210, 109.915; ...
+    NaN, NaN; NaN, NaN; 130, 135.072]; 
+
+% First NaN set is the base of the slip surface at the bathymetry line and 
+% the second NaN set is the break point of the slip surface beneath the block and is the same as pre block. 
+
+postblock_unk = [130, 135.072; 140, 126.025; 150, 120.476; 160, 115.134; ...
+    170, 113.386; 180, 112.829; 190, 114.319; 200, 115.227; 210, 111.7; ... 
+    220, 113.849; 230, 109.907; 240, 107.473; ...
+    NaN, NaN; NaN, NaN; 130, 135.072];
+
+% I need to get the unknown locations that will use to iterate in the T&E
+% section. I need them to put them one by one in the NaNs and then
+% calculate the area as a proxy to mass.
+% Refer to my notebook to see where are these unknowns and for a psuedo
+% code
+
+%% GENERATE SLIP SURFACES: "WALL" & "BASE"
+
+% I'm generating this based on the geometry of the problem.
+
+% The base's unknowns are two points. One where it intersects the pre block
+% bathymetry and one where it intersects with the wall. The bathymetry
+% point varies by dy and 100.93<y<109.91. The x for this point for the
+% preblock is 210. Later we will change this to check to see if it would make any
+% difference but currently I'm considering that the water just drops 9 ft
+% down immediately.
+
+% Here I'm creating all the possible baselines that could be between the
+% range.
+
+b = linspace(109.91, 100.93, 200); % y values for the base lines
+x = linspace(130, 280, 200); % x values for the base lines. I'm extending this
+% to go past the post block bathymetry so i don't have to generate a new
+% set of baselines to get that intersection later
+
+% just adding in the post bathymetry line so i can calculate the
+% intersections later
+x1_postbathy = 240; y1_postbathy = 107.473;
+x2_postbathy = 270; y2_postbathy = 101.035;
+
+baseline = cell(200,1); % a cell array to store all the line arrays
+
+% cell array should be 200 in length because 200 lines (y values) and
+% each element should be two columns x and y and 200 in length for all 
+% the x values =>
+
+for k = 1:200
+    % for all the x, pick a y and create a horizontal line in x, y array
+    baseline{k} = [x', repmat(b(k), 200, 1)]; 
+end
+
+
+% The wall's unknown is just one and that's where it intersects with the
+% base. The wall point varies by alpha. alpha is the angle of the slip slip
+% surface and the horizontal surface. like the active wedge angle alpha a.
+% see my notebook for a sketch. This alpha can determine the line since we
+% already have the starting point of the slip surface in the geometry. 
+% I'll set the range from 90 to 41.14 so it is tangent to the post slide surface.
+% With having all the "wall" possibilities and all the "base" possibilities we
+% can find all the intersection possibilities. 
+
+% Here I'm creating all the possible wall lines that could be between the
+% range I identified.
+
+x0 = 130; y0 = 135.072; % the origin point which is in the geometry
+alpha = linspace(-60, -41.14, 200); % alpha range
+L = 60; % length of the line. Arbitrary number so we can create a line.
+npts = 200; % number of points along the line. Again so we can create a 
+% line with good intersection
+
+wallline = cell(length(alpha), 1); % cell array to store all the wall geometry
+
+for k = 1:length(alpha)
+    % assigning so it's easier
+    a = alpha(k);
+    s = linspace(0, L, npts);
+    % basic trig
+    linex = x0 + s .* cosd(a);
+    liney = y0 + s .* sind(a);
+    % this cell array should be 200 in length and each element should be two
+    % columns x and y of each wall line.
+    wallline{k} = [linex', liney']; 
+end
+
+%% INTERSECTIONS BETWEEN: "WALL" & "BASE", "BASE" & "BATHY" OF PRE BLOCK
+
+% Now that I have all the possible wall lines and base lines, it's time to
+% find the intersection between them. Since we have 200 base and 200 wall,
+% we should have 250,000 intersections. Some of them may not intersect so
+% we can set those to nan later.
+
+nB = numel(b); nW = numel(alpha); % getting the correct number of elements
+
+% creating a new matrix of 100x100 to store xi, yi, bi, and alphai. bi is the
+% dy or the y for the intersection with bathymetry which technically is the
+% same as yi because the baseline is horizontal. in these matrices the
+% columns are going to be wall and the rows are going to be base.
+
+wallbase_pre_xi = NaN(nB, nW);   % wall and base x intersection
+wallbase_pre_yi = NaN(nB, nW);   % wall and base y intersection
+basebathy_pre_xi = NaN(nB, nW);  % base and bathy x intersection
+basebathy_pre_yi = NaN(nB, nW);  % base and bathy y intersection which is 
+% same as wallbase_pre_yi since this is a horizontal base
+wallbase_pre_alphai  = NaN(nB, nW);   % alpha value for each wall line
+s_mat   = NaN(nB, nW);   % s parameter for each (baseline, wall) pair
+x_min = 130; x_max = 210;
+
+for j = 1:nW
+    a = alpha(j); % grab the right alpha for this wall
+    sina = sind(a); cosa = cosd(a); % calculating these to make it easier
+    
+    % if sin of alpha is zero means that the wall is horizontal which 
+    % does not make sense so we are skipping this if happens but will not 
+    % because we did not define it like that before but anyways in case you
+    % want to use this code for other locations
+    if abs(sina) < 1e-6
+        continue  
+    end
+
+    for i = 1:nB
+        % wall equation is yw = y0 + s*sina and base equation is yb = b so we are
+        % solving where yw = yb for s which is one intersection per base and one
+        % wall(j)
+        s_val = (b(i) - y0) / sina;    % scalar s for this baseline i and wall j
+        % finding the x for these values because xw = x0 + s*cosa. same with
+        % the length
+        x_val = x0 + s_val * cosa;     % scalar x for this baseline i and wall j
+
+        % checking to see if these intersections make sense with our geometry
+        if (s_val >= 0) && (s_val <= L) && (x_val >= x_min) && (x_val <= x_max)
+
+            % append the values to the matrix we created at the beginning
+            wallbase_pre_xi(i, j) = x_val;
+            wallbase_pre_yi(i, j) = b(i);     
+            basebathy_pre_xi(i, j) = 210;
+            basebathy_pre_yi(i, j) = b(i);
+            wallbase_pre_alphai(i, j) = a;
+            s_mat(i, j) = s_val;
+
+            fprintf('Wall line %d, Baseline %d, Intersection stored in (%d, %d)\n', ...
+                    j, i, i, j);
+        end
+
+    end
+
+end
+
+
+%% INTERSECTIONS BETWEEN: "WALL" & "BASE", "BASE" & "BATHY" OF POST BLOCK
+
+% the intersection between the wall and base is the same as the pre block 
+% so here I'm just calculating the intersections between all the bases and
+% the post slide bathymetry.
+
+% temporary vectors to store 1D intersections (one per baseline)
+post_bathy_xi = NaN(nB, 1);
+post_bathy_yi = NaN(nB, 1);
+
+for i = 1:nB
+    bl = baseline{i};  % 100x2 baseline
+    % baseline polyline
+    bx = bl(:,1);
+    by = bl(:,2);
+    % bathy post line
+    wx = [x1_postbathy x2_postbathy];
+    wy = [y1_postbathy y2_postbathy];
+    % find intersection
+    [xi_tmp, yi_tmp] = polyxpoly(bx, by, wx, wy);
+
+    if ~isempty(xi_tmp)
+        % only need the first intersection point
+        post_bathy_xi(i) = xi_tmp(1);  % xi
+        post_bathy_yi(i) = yi_tmp(1);  % yi
+
+        fprintf('Baseline %d: xi = %.3f, yi = %.3f, b = %.3f\n', ...
+                i, xi_tmp(1), yi_tmp(1), b(i));
+    else
+        fprintf('No intersection for baseline %d was found\n', i);
+    end
+
+end
+
+% copy pre wall–base intersections to post wall–base intersections
+wallbase_post_xi = wallbase_pre_xi;
+wallbase_post_yi = wallbase_pre_yi;
+
+% since we have 200 baselines and 1 bathymetry line we only have 200
+% intersections, but these need to be repeated across 200 columns to make
+% everything the same 200 by 200 size. again, for one wall line, we have
+% 200 base bathy intersection, so for 200 wall lines we have 100x100 base
+% bathy intersection.
+basebathy_post_xi = repmat(post_bathy_xi, 1, nW);
+basebathy_post_yi = repmat(post_bathy_yi, 1, nW);
+
+%% CREATE THE COMPLETED PRE AND POST BLOCKS
+
+% i have all the unknowns now so we're going back to the first section and
+% finishing up the blocks for every xi,yi intersection we found that are 
+% stored in:
+% wallbase_post_xi, wallbase_pre_xi
+% wallbase_post_yi, wallbase_pre_yi
+% basebathy_post_xi, basebathy_pre_xi
+% basebathy_post_yi, basebathy_pre_yi
+
+% in order to do this i need to create a preblock cell array that is
+% 100x100 and a postblock cell array that is 100x100. i need to create a
+% nested loop that first fills the pre and post blocks unknowns for every
+% set and then puts that array into a solution in it's correct location.
+
+preblock_solutions  = cell(nB, nW);
+postblock_solutions = cell(nB, nW);
+
+for j = 1:nW
+
+    for i = 1:nB
+        
+        % skip this pair if ANY of the required intersections are missing.
+        % I have a lot of nan in basebathy post
+        if any(isnan([basebathy_pre_xi(i, j), basebathy_pre_yi(i, j), ...
+                      wallbase_pre_xi(i, j),  wallbase_pre_yi(i, j), ...
+                      basebathy_post_xi(i, j), basebathy_post_yi(i, j), ...
+                      wallbase_post_xi(i, j),  wallbase_post_yi(i, j)]))
+            continue
+        end
+
+        % base of slip surface at the bathymetry line (pre)
+        preblock_unk(10, 1) = basebathy_pre_xi(i, j);
+        preblock_unk(10, 2) = basebathy_pre_yi(i, j);
+        % break point of the slip surface beneath the block (pre wall intersection)
+        preblock_unk(11, 1) = wallbase_pre_xi(i, j);
+        preblock_unk(11, 2) = wallbase_pre_yi(i, j);
+        preblock_solutions{i, j} = preblock_unk;
+
+        % base of slip surface at the post bathymetry line
+        postblock_unk(13, 1) = basebathy_post_xi(i, j);
+        postblock_unk(13, 2) = basebathy_post_yi(i, j);
+        % break point of the slip surface beneath the block (post wall intersection)
+        postblock_unk(14, 1) = wallbase_post_xi(i, j);
+        postblock_unk(14, 2) = wallbase_post_yi(i, j);
+        postblock_solutions{i, j} = postblock_unk;
+
+        fprintf('Stored block for wall line %d and baseline %d in solutions (%d, %d)\n', j, i, i, j);
+    end
+
+end
+
+
+
+%% Compute areas for each block and area differences
+
+area_diff = NaN(nB, nW);   % signed difference (pre - post)
+
+for j = 1:nW
+
+    for i = 1:nB
+        fprintf('Calculating differences in block pair %d (%d, %d)\n', ...
+                (i-1)*nW+j, i, j);
+
+        if isempty(preblock_solutions{i,j}) || isempty(postblock_solutions{i,j})
+            fprintf('Block pair %d is empty, skipped to next pair\n', (i-1)*nW+j);
+            continue
+        end
+
+        preB  = preblock_solutions{i, j};
+        postB = postblock_solutions{i, j};
+        areapre = polyarea(preB(:,1), preB(:,2));
+        areapost = polyarea(postB(:,1), postB(:,2));
+        area_diff(i, j) =  areapre - areapost;                   
+    end
+
+end
+
+
+[~, best] = min(abs(area_diff(:)), [], 'omitnan');
+[i_best, j_best] = ind2sub([nB, nW], best);
+
+fprintf('Best block pair: (i = %d, j = %d), area_diff = %.6f\n', ...
+        i_best, j_best, area_diff(i_best, j_best));
+%fprintf('Best pre block bathymetry intersection x = %d, y = %d:\n', ...
+%    basebathy_post_xi(i, j), basebathy_pre_yi(i, j));
+%fprintf('Best pre block wall and base intersection x = %d, y = %d:\n', ...
+%    wallbase_pre_xi(i, j), wallbase_pre_yi(i, j));
+fprintf('Pre block unknowns:\n bathymetry intersection x = %.2f, y = %.2f\n wall and base intersection x = %.2f, y = %.2f\n', ...
+    basebathy_pre_xi(i_best, j_best), basebathy_pre_yi(i_best, j_best), wallbase_pre_xi(i_best, j_best), wallbase_pre_yi(i_best, j_best))
+fprintf('Post block unknowns:\n bathymetry intersection x = %.2f, y = %.2f\n wall and base intersection x = %.2f, y = %.2f\n alpha %.2f', ...
+    basebathy_post_xi(i_best, j_best), basebathy_post_yi(i_best, j_best), wallbase_post_xi(i_best, j_best), wallbase_post_yi(i_best, j_best), wallbase_pre_alphai(i_best, j_best))
+
+postB = postblock_solutions{i_best, j_best};
+preB = preblock_solutions{i_best, j_best};
+
+figure;
+ax2 = axes;
+hold(ax2, "on");
+plot(ax2, c01xa.surf_dist, c01xa.surf_elv, 'LineWidth', 2, 'Color', [0 0 0 1])
+plot(ax2, presurf(:, 2), presurf(:, 1), 'LineWidth', 2, 'Color', [0 0 0 0.3])
+plot(ax2, bathymetry.post(:, 3), bathymetry.post(:, 1), 'LineWidth', 2, 'Color', [150, 0, 110, 255]./255, 'LineStyle','--')
+plot(ax2, bathymetry.pre(:, 3), bathymetry.pre(:, 1), 'LineWidth', 2, 'Color', [150, 0, 110, 100]./255, 'LineStyle','--')
+plot(ax2, preB(:, 1), preB(:, 2), 'LineWidth', 2, 'Color', 'c')
+plot(ax2, postB(:, 1), postB(:, 2), 'LineWidth', 2, 'Color', 'm')
+xlim(ax2, [0 400]);
+xlabel('x');
+ylabel('y');
+title('Solution Blocks');
+grid(ax2, 'on');
+hold(ax2, 'off');
+
+x1 = postB(end-1, 1); y1 = postB(end-1, 2);
+x2 = postB(end, 1); y2 = postB(end, 2);
+m = (y2 - y1) / (x2 - x1);
+thetad = atan(m) * (180/pi);
+fprintf('Slope m = %.3f\n', m);
+fprintf('Angle of the slip surface (deg) = %.3f\n', -thetad);
+fprintf('Active wedge alpha (deg) for phi 27 = %.3f\n', 45+27/2)
+
+%%
+
+% %%
+% 
+% % Bathy line post and intersections with baselines 
+% 
+% % Bathymetry post line segment
+% bathy_x = [240 270];
+% bathy_y = [107.473 101.035];
+% 
+% % Intersections with baselines
+% post_bathy_base_intersection = NaN(200, 3);
+% 
+% for i = 1:200
+%     bl = baseline{i};
+% 
+%     [xi, yi] = polyxpoly(bl(:,1), bl(:,2), bathy_x, bathy_y);
+% 
+%     if ~isempty(xi)
+%         post_bathy_base_intersection(i,:) = [xi(1), yi(1), b(i)];
+%         fprintf('Postbathy intersection %d: baseline %d at (%.3f, %.3f), b = %.3f\n', ...
+%                 i, i, xi(1), yi(1), b(i));
+%     else
+%         post_bathy_base_intersection(i,:) = [NaN, NaN, b(i)];
+%         fprintf('Postbathy intersection %d: no intersection for baseline %d, b = %.3f\n', ...
+%                 i, i, b(i));
+%     end
+% end
+% 
+% % Example plot with wall lines, baselines, and bathy post intersections 
+% 
+% idxBaseline = round(linspace(1, 200, 25));
+% idxWall     = round(linspace(1, 200, 25));
+% 
+% figure;
+% ax1 = axes;
+% hold(ax1, 'on');
+% 
+% for n = 1:25
+%     bl = baseline{idxBaseline(n)};
+%     wl = wallline{idxWall(n)};
+% 
+%     plot(ax1, bl(:,1), bl(:,2), 'r-');
+%     plot(ax1, wl(:,1), wl(:,2), 'b-');
+% 
+%     [xi_bw, yi_bw] = polyxpoly(bl(:,1), bl(:,2), wl(:,1), wl(:,2));
+%     if ~isempty(xi_bw)
+%         plot(ax1, xi_bw, yi_bw, 'ko', 'MarkerFaceColor', 'y');
+%     end
+% 
+%     [xi_bp, yi_bp] = polyxpoly(bl(:,1), bl(:,2), bathy_x, bathy_y);
+%     if ~isempty(xi_bp)
+%         plot(ax1, xi_bp, yi_bp, 'ko', 'MarkerFaceColor', 'g');
+%     end
+% end
+% 
+% plot(ax1, c01xa.surf_dist, c01xa.surf_elv, 'LineWidth', 2, 'Color', [0 0 0 1])
+% plot(ax1, presurf(:, 2), presurf(:, 1), 'LineWidth', 2, 'Color', [0 0 0 0.3])
+% plot(ax1, bathymetry.post(:, 3), bathymetry.post(:, 1), 'LineWidth', 2, 'Color', [150, 0, 110, 255]./255, 'LineStyle','--')
+% plot(ax1, bathymetry.pre(:, 3), bathymetry.pre(:, 1), 'LineWidth', 2, 'Color', [150, 0, 110, 100]./255, 'LineStyle','--')
+% xlim(ax1, [0 350]);
+% xlabel('x');
+% ylabel('y');
+% title('Example Wall Lines, Baselines, and Bathy Post Intersections');
+% grid(ax1, 'on');
+% hold(ax1, 'off');
+% 
+
+
+%%
+
+figure;
+imagesc(alpha, b, area_diff);  % x: alpha, y: baseline depth
+set(gca, 'YDir', 'normal');
+colorbar;
+xlabel('\alpha (deg)');
+ylabel('b (baseline elevation)');
+title('area\_diff(i,j) = A_{pre} - A_{post}');
